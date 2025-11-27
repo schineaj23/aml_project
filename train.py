@@ -21,7 +21,7 @@ class IQDataset(Dataset):
         self.transform = transform
         self.use_complex = use_complex
 
-        self.class_map = {"bpsk": 0.0, "qpsk": 1.0, "qam16": 2.0, "qam64": 3.0}
+        self.class_map = {"bpsk": 0, "qpsk": 1, "qam16": 2, "qam64": 3}
         self.samples = []  # list of (filepath, label)
 
         signals_dir = os.path.join(root_dir, "signals")
@@ -43,6 +43,7 @@ class IQDataset(Dataset):
             label = self.class_map.get(mod)
             if label is None:
                 # unknown modulation suffix; skip
+                print("unknown modulation for file:", f)
                 continue
 
             # Enforce per-class limit
@@ -62,6 +63,7 @@ class IQDataset(Dataset):
 
         # Load complex128 npy
         x = np.load(path)  # shape: (N,) complex128
+        
 
         # Just use the torch.complex128 directly for the CVNN
         # shape (N,) complex128
@@ -69,13 +71,14 @@ class IQDataset(Dataset):
         if not self.use_complex:
             # Convert complex -> 2-channel float32 [real, imag]
             x_prime = np.stack([x.real, x.imag], axis=0).astype(np.float32)
-            print(x_prime.shape)
             # shape: (2, N)
 
         if self.transform:
             x_prime = self.transform(x_prime)
-
-        return torch.tensor(x_prime), torch.tensor(label, dtype=torch.long)
+        label_arr = torch.zeros(4, dtype=torch.float32)
+        label_arr[label] = 1.0
+        
+        return torch.tensor(x_prime), torch.tensor(label_arr, dtype=torch.float32)
 
 
 # instead of their strategies which go from essentially 64 -> 1024
@@ -230,6 +233,7 @@ class AverageCrossEntropyLoss(nn.Module):
             imag_loss = self.loss_fn_imag(torch.imag(input), target)
             return (real_loss + imag_loss) / 2
 
+
         return self.loss_fn_real(input, target)
 
 def train(dataloader, model, loss_fn, optimizer, epochs):
@@ -245,6 +249,7 @@ def train(dataloader, model, loss_fn, optimizer, epochs):
                 # Compute prediction and loss
                 X = X.reshape(batch_size, 2, -1)
                 pred = model(X)
+
                 loss = loss_fn(pred, y)
 
                 loss.backward()
