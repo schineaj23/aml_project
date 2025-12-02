@@ -54,9 +54,7 @@ class IQDataset(Dataset):
             self.samples.append((os.path.join(signals_dir, f), label))
             counts[label] += 1
 
-        print(
-            f"Loaded {len(self.samples)} total samples (counts per label: {dict(counts)})"
-        )
+        print(f"Loaded {len(self.samples)} total samples (counts per label: {dict(counts)})")
 
     def __len__(self):
         return len(self.samples)
@@ -97,7 +95,6 @@ class ConventionalVGG(nn.Module):
             self.vgg_block_small(1024, 512),
             self.vgg_block_big(512, 256),
             self.vgg_block_big(256, 128),
-            self.vgg_block_big(128, 128),
         )
 
         # further downsample with linear layers
@@ -170,9 +167,7 @@ class ResidualBlock(nn.Module):
         )
 
         if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Conv1d(
-                in_channels, out_channels, kernel_size=1, stride=stride
-            )
+            self.shortcut = nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride)
         else:
             self.shortcut = nn.Identity()
 
@@ -200,6 +195,7 @@ class ResNet(nn.Module):
         # global average pooling
         x = torch.mean(x, dim=2)
         return F.relu(self.fc(x))
+
 
 class ComplexResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
@@ -229,7 +225,7 @@ class ComplexResidualBlock(nn.Module):
         )
 
         if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Conv1d( in_channels, out_channels, kernel_size=1, stride=stride)
+            self.shortcut = nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride)
         else:
             self.shortcut = nn.Identity()
 
@@ -307,9 +303,32 @@ def train(dataloader, model, is_complex, loss_fn, optimizer, epochs):
                 optimizer.zero_grad()
 
                 loss, current = loss.item(), batch * batch_size + len(X)
-                print(
-                    f"Epoch [{epoch + 1}/{epochs}], loss: {loss:>7f}  [{current:>5d}/{size:>5d}]"
-                )
+                print(f"Epoch [{epoch + 1}/{epochs}], loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+
+
+def evaluate(dataloader, model, loss_fn, is_complex):
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    model.eval()
+    test_loss = 0
+    correct = 0
+
+    with torch.no_grad():
+        for X, y in dataloader:
+            if torch.cuda.is_available():
+                X = X.to("cuda:0")
+                y = y.to("cuda:0")
+            batch_size = X.shape[0]
+            if is_complex:
+                X = X.reshape(batch_size, 1, -1)
+            else:
+                X = X.reshape(batch_size, 2, -1)
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
+            correct += (pred.argmax(1) == y.argmax(1)).type(torch.float).sum().item()
+    test_loss /= num_batches
+    correct /= size
+    print(f"Test Error: \n Accuracy: {(100 * correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
 
 
 def main():
@@ -327,12 +346,11 @@ def main():
         type=str,
         choices=["resnet", "vgg", "complex"],
         default="resnet",
+        required=True,
         help="model architecture to use",
     )
     parser.add_argument("--batch", type=int, default=5, help="training batch size")
-    parser.add_argument(
-        "--epochs", type=int, default=10, help="number of training epochs"
-    )
+    parser.add_argument("--epochs", type=int, default=10, help="number of training epochs")
     parser.add_argument(
         "--save-path",
         type=str,
@@ -340,7 +358,10 @@ def main():
         help="path to save model checkpoint after training",
     )
     parser.add_argument("--save", "-s", action="store_true")
-
+    parser.add_argument(
+        "--eval-only", action="store_true", help="only run evaluation on the test set"
+    )
+    parser.add_argument("--load-model-path", type=str, help="file path of model to load")
     print(torch.__version__)
     print(torch.cuda.is_available())
 
@@ -352,16 +373,16 @@ def main():
     batch_size = args.batch
     save_path = args.save_path
     save_model = args.save
+    eval_only = args.eval_only
+    load_model_path = args.load_model_path
 
     print(
         f"Using dataset={dataset_root}, model={selected_model}, use_complex={use_complex_inputs}, "
         f"batch_size={batch_size}"
     )
-    dataset = IQDataset(
-        dataset_root, max_per_class=1000, use_complex=use_complex_inputs
-    )
+    train_dataset = IQDataset(dataset_root, max_per_class=1000, use_complex=use_complex_inputs)
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     if selected_model == "resnet":
         model = ResNet()
@@ -372,16 +393,30 @@ def main():
         model = model.to(torch.complex128)
     if torch.cuda.is_available():
         model = model.to("cuda:0")
-    optim = torch.optim.SGD(model.parameters())
 
-    # print(model)
-    # exit(0)
-    torch.autograd.set_detect_anomaly(True)
+    optim = torch.optim.Adam(model.parameters())
+
+    if eval_only:
+        if load_model_path is None:
+            print("Must provide --load-model path when using --eval-only")
+            return
+        model.load_state_dict(torch.load(load_model_path, weights_only=True))
+        test_dataset = IQDataset(dataset_root, max_per_class=10000, use_complex=use_complex_inputs)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+        evaluate(test_loader, model, AverageCrossEntropyLoss(), use_complex_inputs)
+        return
+
     train(loader, model, use_complex_inputs, AverageCrossEntropyLoss(), optim, args.epochs)
 
     if save_model:
         os.makedirs(save_path, exist_ok=True)
-        torch.save(model.state_dict(), os.path.join(save_path, f"{selected_model}.pt"))
+        save_path = os.path.join(save_path, f"{selected_model}.pt")
+        torch.save(model.state_dict(), save_path)
+        print(f"Model saved to {save_path}")
+
+    test_dataset = IQDataset(dataset_root, max_per_class=1000, use_complex=use_complex_inputs)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    evaluate(test_loader, model, AverageCrossEntropyLoss(), use_complex_inputs)
 
 
 if __name__ == "__main__":
