@@ -9,6 +9,7 @@ from complex_batchnorm import BatchNorm1d as ComplexBatchNorm1d
 from complextorch import nn as cvnn
 import argparse
 from tqdm import tqdm
+from torch.profiler import profile, ProfilerActivity, record_function
 
 
 class IQDataset(Dataset):
@@ -288,15 +289,17 @@ def train(dataloader, model, is_complex, loss_fn, optimizer, epochs):
         model.train()
         with torch.autograd.set_detect_anomaly(True):
             for batch, (X, y) in enumerate(dataloader):
+                if is_complex and not X.is_contiguous():
+                    X = X.contiguous()
                 if torch.cuda.is_available():
-                    X = X.to("cuda:0")
-                    y = y.to("cuda:0")
+                    X = X.to("cuda:0", non_blocking=True)
+                    y = y.to("cuda:0", non_blocking=True)
                 # Compute prediction and loss
                 if is_complex:
-                    X = X.reshape(batch_size, 1, -1)
+                    x = X.view(batch_size, 1, -1)
                 else:
-                    X = X.reshape(batch_size, 2, -1)
-                pred = model(X)
+                    x = X.reshape(batch_size, 2, -1)
+                pred = model(x)
                 loss = loss_fn(pred, y)
 
                 loss.backward()
@@ -317,20 +320,23 @@ def evaluate(dataloader, model, loss_fn, is_complex):
 
     with torch.no_grad():
         for X, y in tqdm(dataloader):
+            if is_complex and not X.is_contiguous():
+                X = X.contiguous()
             if torch.cuda.is_available():
-                X = X.to("cuda:0")
-                y = y.to("cuda:0")
+                X = X.to("cuda:0", non_blocking=True)
+                y = y.to("cuda:0", non_blocking=True)
             if is_complex:
-                X = X.reshape(batch_size, 1, -1)
-                # pass
+                x = X.view(batch_size, 1, -1)
             else:
-                X = X.reshape(batch_size, 2, -1)
-            pred = model(X)
-            test_loss += loss_fn(pred, y).item()
+                x = X.reshape(batch_size, 2, -1)
+            pred = model(x)
+            test_loss += loss_fn(pred, y)
             if is_complex:
                 pred = torch.real(pred)
-            correct += (pred.argmax(1) == y.argmax(1)).type(torch.float).sum().item()
+            correct += (pred.argmax(1) == y.argmax(1)).sum()
+    test_loss = test_loss.item()
     test_loss /= num_batches
+    correct = correct.item()
     correct /= size
     print(f"Test Error: \n Accuracy: {(100 * correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
 
@@ -409,9 +415,13 @@ def main():
             print("Must provide --load-path when using --eval-only")
             return
         model.load_state_dict(torch.load(load_model_path, weights_only=True))
-        test_dataset = IQDataset(dataset_root, max_per_class=1000, use_complex=use_complex_inputs)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=0)
+        test_dataset = IQDataset(dataset_root, max_per_class=20, use_complex=use_complex_inputs)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=torch.cuda.is_available())
+        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], with_stack=True, record_shapes=True) as prof:
+        #     with record_function("model_inference"):
         evaluate(test_loader, model, AverageCrossEntropyLoss(), use_complex_inputs)
+        # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+        # prof.export_chrome_trace(f"trace{"_complex" if use_complex_inputs else ""}.json")
         return
 
     if load_checkpoint:
