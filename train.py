@@ -203,6 +203,7 @@ class ResNet(nn.Module):
         x = self.residual(x)
         # global average pooling
         x = torch.mean(x, dim=2)
+        # x = F.relu(self.fc1(x))
         return self.fc(x)
 
 
@@ -259,12 +260,15 @@ class ComplexResNet(nn.Module):
         )
 
         self.fc = nn.Linear(512, 4)
+        # self.fc2 = nn.Linear(64, 4)
+        self.activation = cvnn.zReLU()
 
     def forward(self, x: torch.tensor):
         # x: (batch, 2, N)
         x = self.residual(x)
         # global average pooling
         x = torch.mean(x, dim=2)
+        # x = self.activation(self.fc1(x))
         return self.fc(x)
 
 
@@ -455,7 +459,7 @@ def main():
 
     print(f"Using dataset={dataset_root}, model={selected_model}, use_complex={use_complex_inputs}")
 
-    train_dataset = IQDataset(dataset_root, max_per_class=5000, use_complex=use_complex_inputs)
+    train_dataset = IQDataset(dataset_root, max_per_class=10000, use_complex=use_complex_inputs)
     test_dataset = IQDataset(dataset_root, max_per_class=1000, use_complex=use_complex_inputs)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -471,6 +475,7 @@ def main():
     
     if torch.cuda.is_available():
         model = model.to(DEVICE)
+        model = torch.compile(model)
 
     optim = torch.optim.AdamW(model.parameters())
 
